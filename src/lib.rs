@@ -1,5 +1,6 @@
 use rand::distributions::Uniform;
-use rand::{thread_rng, Rng};
+use rand::rngs::ThreadRng;
+use rand::Rng;
 use std::collections::HashMap;
 
 use Value::*;
@@ -25,6 +26,7 @@ pub struct StateUnrolled {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateRolled {
+    pub rolled: usize,
     pub scorable: Vec<Value>,
     pub score_at_risk: usize,
     pub score: usize,
@@ -40,33 +42,27 @@ impl Default for StateUnrolled {
     }
 }
 
-pub fn step<'a, F>(state: StateUnrolled, strategy: F) -> StateUnrolled
-where
-    F: Fn(&StateRolled) -> Vec<Value>,
-{
-    fn f() -> Value {
-        let mut rng = thread_rng();
-        let dist = Uniform::new(1, 6);
-        match rng.sample(dist) {
-            1 => One,
-            2 => Two,
-            3 => Three,
-            4 => Four,
-            5 => Five,
-            _ => Six,
-        }
+fn roll(rng: &mut ThreadRng) -> Value {
+    // [low, high)
+    let dist = Uniform::new(1, 7);
+    match rng.sample(dist) {
+        1 => One,
+        2 => Two,
+        3 => Three,
+        4 => Four,
+        5 => Five,
+        6 => Six,
+        _ => panic!("that's not how dice work."),
     }
-    _step(state, strategy, f)
 }
 
-fn _step<'a, F, R>(state: StateUnrolled, strategy: F, roll: R) -> StateUnrolled
+pub fn step<'a, F>(state: StateUnrolled, strategy: F, rng: &mut ThreadRng) -> StateUnrolled
 where
     F: Fn(&StateRolled) -> Vec<Value>,
-    R: Fn() -> Value,
 {
     let mut rolled: Vec<Value> = vec![];
     for _ in 1..=state.dice_left {
-        rolled.push(roll());
+        rolled.push(roll(rng));
     }
 
     let (max_score, scorable) = score(&rolled);
@@ -82,6 +78,7 @@ where
 
     // state the "player" sees to apply their strategy to
     let state = StateRolled {
+        rolled: state.dice_left,
         scorable,
         score_at_risk: state.score_at_risk + max_score,
         score: state.score,
@@ -98,28 +95,30 @@ where
         // legality of the provided strategy is not actually enforced
         reserved => {
             let (score, _) = score(reserved);
+            let mut dice_left = state.rolled - reserved.len();
+            if dice_left == 0 {
+                dice_left = 6;
+            }
             StateUnrolled {
-                dice_left: state.scorable.len() - reserved.len(),
-                score_at_risk: state.score_at_risk + score,
+                dice_left,
+                score_at_risk: state.score_at_risk - max_score + score,
                 score: state.score,
             }
         }
     }
 }
 
-#[test]
-fn test_step() {
-    let next = _step(StateUnrolled::default(), |st| st.scorable.clone(), || One);
-    assert_eq!(0, next.dice_left);
-    assert_eq!(6000, next.score_at_risk);
-}
-
 // used to score six OR LESS dice
 pub fn score<'a>(dice: &[Value]) -> (usize, Vec<Value>) {
     fn score(m: &mut HashMap<usize, Vec<Value>>, scored: &mut Vec<Value>) -> usize {
-        // base case
-        if m.is_empty() {
-            return 0;
+        // the map should have everything in it all the time.
+        assert!(m.values().flatten().count() == 6);
+
+        // base case (complicated way of representing an empty state)
+        if let Some(values) = m.get(&0) {
+            if values.len() == 6 {
+                return 0;
+            }
         }
 
         // 6 of a kind
@@ -145,6 +144,9 @@ pub fn score<'a>(dice: &[Value]) -> (usize, Vec<Value>) {
         // 5 of a kind
         if let Some(values) = m.get(&5) {
             scored.extend(vec![values[0]; 5]);
+            let mut next = m.get(&0).cloned().unwrap_or(vec![]);
+            next.extend(m.get(&5).unwrap());
+            m.insert(0, next);
             m.remove(&5);
             // the last die could be a 1 or a 5
             return 2000 + score(m, scored);
@@ -166,13 +168,18 @@ pub fn score<'a>(dice: &[Value]) -> (usize, Vec<Value>) {
 
         // four of a kind that is not three pairs
         if let Some(values) = m.get(&4) {
+            let values = values.clone();
             scored.extend(vec![values[0]; 4]);
             m.remove(&4);
+            let mut next = m.get(&0).cloned().unwrap_or(vec![]);
+            next.push(values[0]);
+            m.insert(0, next);
             return 2000 + score(m, scored);
         }
 
         // 3 of a kind
         if let Some(values) = m.get(&3) {
+            let values = values.clone();
             // more than one triple is caught earlier so this is safe
             let triple_value = match values[0] {
                 One | Three => 300,
@@ -183,13 +190,16 @@ pub fn score<'a>(dice: &[Value]) -> (usize, Vec<Value>) {
             };
             scored.extend(vec![values[0]; 3]);
             m.remove(&3);
+            let mut next = m.get(&0).cloned().unwrap_or(vec![]);
+            next.extend(values);
+            m.insert(0, next);
             // the last die could be a 1 or a 5
             return triple_value + score(m, scored);
         }
 
         // TODO I can probably figure out how to get rid of this clone
         let ones = m.clone().into_iter().find_map(|(count, values)| {
-            if values.contains(&One) {
+            if values.contains(&One) && count > 0 {
                 Some(count)
             } else {
                 None
@@ -198,13 +208,16 @@ pub fn score<'a>(dice: &[Value]) -> (usize, Vec<Value>) {
 
         if let Some(ones) = ones {
             scored.extend(vec![One; ones]);
-            m.retain(|_, values| !values.contains(&One));
+            m.get_mut(&ones).unwrap().retain(|x| *x != One);
+            let mut next = m.get(&0).cloned().unwrap_or(vec![]);
+            next.push(One);
+            m.insert(0, next);
             return ones * 100 + score(m, scored);
         }
 
         // TODO I can probably figure out how to get rid of this clone
         let fives = m.clone().into_iter().find_map(|(count, values)| {
-            if values.contains(&Five) {
+            if values.contains(&Five) && count > 0 {
                 Some(count)
             } else {
                 None
@@ -213,7 +226,10 @@ pub fn score<'a>(dice: &[Value]) -> (usize, Vec<Value>) {
 
         if let Some(fives) = fives {
             scored.extend(vec![Five; fives]);
-            m.retain(|_, values| !values.contains(&Five));
+            m.get_mut(&fives).unwrap().retain(|x| *x != Five);
+            let mut next = m.get(&0).cloned().unwrap_or(vec![]);
+            next.push(Five);
+            m.insert(0, next);
             return fives * 50 + score(m, scored);
         }
 
@@ -249,4 +265,13 @@ fn test_scores() {
     assert_eq!(300, score(&[One, One, One]).0);
     assert_eq!(0, score(&[]).0);
     assert_eq!((50, vec![Five]), score(&[Two, Five]));
+
+    // minified of below
+    assert_eq!((150, vec![One, Five]), score(&[One, Five]));
+
+    // found by making real runs:
+    assert_eq!(
+        (300, vec![One, One, Five, Five]),
+        score(&[Six, One, Five, One, Four, Five])
+    );
 }
