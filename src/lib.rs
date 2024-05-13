@@ -64,7 +64,11 @@ where
     F: Fn(&StateRolled) -> Vec<Value>,
     R: Fn() -> Value,
 {
-    let rolled: Vec<Value> = vec![roll(); state.dice_left];
+    let mut rolled: Vec<Value> = vec![];
+    for _ in 1..=state.dice_left {
+        rolled.push(roll());
+    }
+
     let (max_score, scorable) = score(&rolled);
     let farkle = max_score == 0;
 
