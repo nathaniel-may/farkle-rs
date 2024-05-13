@@ -25,7 +25,7 @@ fn main() {
 
 // strategy
 // anything that can be set aside will be set aside, never stops rolling (can't win)
-fn reserve_all_push_luck<'a>(state: &State) -> Vec<&'a Die> {
+fn reserve_all_push_luck<'a>(state: &State) -> Vec<Value> {
     todo!()
 }
 

@@ -4,9 +4,6 @@ use std::collections::HashMap;
 
 use Value::*;
 
-// empty indicates stopping
-// requiring a reference to be returned enforces that the return values have to be chosen from the state input itself
-pub type Strategy<'a> = fn(&State) -> Vec<&'a Die>;
 pub type Roll = dyn Fn() -> Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -19,16 +16,10 @@ pub enum Value {
     Six,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Die {
-    id: &'static str,
-    pub value: Value,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct State {
     // None indicates a fresh turn
-    pub unreserved: Option<Vec<Die>>,
+    pub unreserved: Option<Vec<Value>>,
     pub score_at_risk: usize,
     pub score: usize,
 }
@@ -43,37 +34,10 @@ impl Default for State {
     }
 }
 
-// Dice cannot be created outside this library. These are the 6 distinct dice needed to use the library.
-pub fn dice() -> [Die; 6] {
-    [
-        Die {
-            id: "1",
-            value: One,
-        },
-        Die {
-            id: "2",
-            value: One,
-        },
-        Die {
-            id: "3",
-            value: One,
-        },
-        Die {
-            id: "4",
-            value: One,
-        },
-        Die {
-            id: "5",
-            value: One,
-        },
-        Die {
-            id: "6",
-            value: One,
-        },
-    ]
-}
-
-pub fn step(state: State, strategy: Strategy) -> State {
+pub fn step<'a, F>(state: State, strategy: F) -> State
+where
+    F: Fn(&State) -> Vec<Value>,
+{
     fn f() -> Value {
         let mut rng = thread_rng();
         let dist = Uniform::new(1, 6);
@@ -89,21 +53,20 @@ pub fn step(state: State, strategy: Strategy) -> State {
     _step(state, strategy, f)
 }
 
-fn _step<F>(state: State, strategy: Strategy, roll: F) -> State
+fn _step<'a, F, R>(state: State, strategy: F, roll: R) -> State
 where
-    F: Fn() -> Value,
+    F: Fn(&State) -> Vec<Value>,
+    R: Fn() -> Value,
 {
-    let rolled: Vec<Die> = state
+    let rolled: Vec<Value> = state
         .unreserved
-        .unwrap_or_else(|| dice().into())
+        // TODO does this roll each time? or just copy one value 6 times
+        .unwrap_or_else(|| vec![roll(); 6])
         .iter()
-        .map(|d| Die {
-            id: d.id,
-            value: roll(),
-        })
+        .map(|_| roll())
         .collect();
 
-    let max_score = score(&rolled.iter().collect::<Vec<&Die>>());
+    let max_score = score(&rolled);
     let farkle = max_score == 0;
 
     if farkle {
@@ -144,8 +107,19 @@ where
     state
 }
 
+#[test]
+fn test_step() {
+    let next = _step(
+        State::default(),
+        |st| st.unreserved.clone().unwrap_or(vec![]),
+        || One,
+    );
+    assert_eq!(Some(vec![]), next.unreserved);
+    assert_eq!(6000, next.score_at_risk);
+}
+
 // used to score six OR LESS dice
-pub fn score<'a>(dice: &[&Die]) -> usize {
+pub fn score<'a>(dice: &[Value]) -> usize {
     fn score(m: &mut HashMap<usize, Vec<Value>>) -> usize {
         // base case
         if m.is_empty() {
@@ -159,6 +133,11 @@ pub fn score<'a>(dice: &[&Die]) -> usize {
 
         // two triples
         if let Some(2) = m.get(&3).map(|xs| xs.len()) {
+            return 2500;
+        }
+
+        // straight
+        if let Some(6) = m.get(&1).map(|xs| xs.len()) {
             return 2500;
         }
 
@@ -182,7 +161,6 @@ pub fn score<'a>(dice: &[&Die]) -> usize {
         // four of a kind that is not three pairs
         if m.get(&4).is_some() {
             m.remove(&4);
-            // the last die could be a 1 or a 5
             return 2000 + score(m);
         }
 
@@ -225,14 +203,14 @@ pub fn score<'a>(dice: &[&Die]) -> usize {
         });
 
         if let Some(fives) = fives {
-            m.retain(|_, values| !values.contains(&One));
+            m.retain(|_, values| !values.contains(&Five));
             return fives * 50 + score(m);
         }
 
         0
     }
 
-    let count = |v: Value| dice.iter().filter(|d| d.value == v).count();
+    let count = |v: Value| dice.iter().filter(|&vv| *vv == v).count();
     let mut m = HashMap::new();
     for value in [One, Two, Three, Four, Five, Six] {
         let count = count(value);
@@ -242,4 +220,17 @@ pub fn score<'a>(dice: &[&Die]) -> usize {
         m.insert(count, values);
     }
     score(&mut m)
+}
+
+#[test]
+fn test_scores() {
+    assert_eq!(3000, score(&[One, One, One, One, One, One]));
+    assert_eq!(2500, score(&[One, Two, Three, Four, Five, Six]));
+    assert_eq!(2050, score(&[One, One, One, One, One, Five]));
+    assert_eq!(2500, score(&[One, One, One, Two, Two, Two]));
+    assert_eq!(1500, score(&[One, One, Two, Two, Two, Two]));
+    assert_eq!(200, score(&[Five, Five, One, Two, Three, Two]));
+    assert_eq!(300, score(&[One, One, One]));
+    assert_eq!(0, score(&[]));
+    assert_eq!(50, score(&[Two, Five]));
 }
