@@ -17,26 +17,32 @@ pub enum Value {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct State {
-    // None indicates a fresh turn
-    pub unreserved: Option<Vec<Value>>,
+pub struct StateUnrolled {
+    pub dice_left: usize,
     pub score_at_risk: usize,
     pub score: usize,
 }
 
-impl Default for State {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateRolled {
+    pub scorable: Vec<Value>,
+    pub score_at_risk: usize,
+    pub score: usize,
+}
+
+impl Default for StateUnrolled {
     fn default() -> Self {
-        State {
-            unreserved: None,
+        StateUnrolled {
+            dice_left: 6,
             score_at_risk: 0,
             score: 0,
         }
     }
 }
 
-pub fn step<'a, F>(state: State, strategy: F) -> State
+pub fn step<'a, F>(state: StateUnrolled, strategy: F) -> StateUnrolled
 where
-    F: Fn(&State) -> Vec<Value>,
+    F: Fn(&StateRolled) -> Vec<Value>,
 {
     fn f() -> Value {
         let mut rng = thread_rng();
@@ -53,130 +59,128 @@ where
     _step(state, strategy, f)
 }
 
-fn _step<'a, F, R>(state: State, strategy: F, roll: R) -> State
+fn _step<'a, F, R>(state: StateUnrolled, strategy: F, roll: R) -> StateUnrolled
 where
-    F: Fn(&State) -> Vec<Value>,
+    F: Fn(&StateRolled) -> Vec<Value>,
     R: Fn() -> Value,
 {
-    let rolled: Vec<Value> = state
-        .unreserved
-        // TODO does this roll each time? or just copy one value 6 times
-        .unwrap_or_else(|| vec![roll(); 6])
-        .iter()
-        .map(|_| roll())
-        .collect();
-
-    let max_score = score(&rolled);
+    let rolled: Vec<Value> = vec![roll(); state.dice_left];
+    let (max_score, scorable) = score(&rolled);
     let farkle = max_score == 0;
 
     if farkle {
-        return State {
-            unreserved: None,
+        return StateUnrolled {
+            dice_left: 6,
             score_at_risk: 0,
             score: state.score,
         };
     }
 
     // state the "player" sees to apply their strategy to
-    let mut state = State {
-        unreserved: Some(rolled.clone()),
+    let state = StateRolled {
+        scorable,
         score_at_risk: state.score_at_risk + max_score,
         score: state.score,
     };
     match &strategy(&state)[..] {
         // strategy didn't reserve any dice, so they cannot continue rolling.
-        // score the score at risk and move on
-        [] => {
-            state.unreserved = None;
-            state.score_at_risk = 0;
-            state.score = state.score + state.score_at_risk;
-        }
+        // tally the score_at_risk and move on
+        [] => StateUnrolled {
+            dice_left: 6,
+            score_at_risk: 0,
+            score: state.score + state.score_at_risk,
+        },
 
-        // legality of move is enforced via the type for defining a strategy,
-        // so don't check it again here.
+        // legality of the provided strategy is not actually enforced
         reserved => {
-            state.unreserved = Some(
-                rolled
-                    .into_iter()
-                    .filter(|die| !reserved.contains(&die))
-                    .collect(),
-            );
-            state.score_at_risk = state.score_at_risk + score(&reserved);
+            let (score, _) = score(reserved);
+            StateUnrolled {
+                dice_left: state.scorable.len() - reserved.len(),
+                score_at_risk: state.score_at_risk + score,
+                score: state.score,
+            }
         }
     }
-    state
 }
 
 #[test]
 fn test_step() {
-    let next = _step(
-        State::default(),
-        |st| st.unreserved.clone().unwrap_or(vec![]),
-        || One,
-    );
-    assert_eq!(Some(vec![]), next.unreserved);
+    let next = _step(StateUnrolled::default(), |st| st.scorable.clone(), || One);
+    assert_eq!(0, next.dice_left);
     assert_eq!(6000, next.score_at_risk);
 }
 
 // used to score six OR LESS dice
-pub fn score<'a>(dice: &[Value]) -> usize {
-    fn score(m: &mut HashMap<usize, Vec<Value>>) -> usize {
+pub fn score<'a>(dice: &[Value]) -> (usize, Vec<Value>) {
+    fn score(m: &mut HashMap<usize, Vec<Value>>, scored: &mut Vec<Value>) -> usize {
         // base case
         if m.is_empty() {
             return 0;
         }
 
         // 6 of a kind
-        if m.get(&6).is_some() {
+        if let Some(values) = m.get(&6) {
+            scored.extend(vec![values[0]; 6]);
             return 3000;
         }
 
         // two triples
         if let Some(2) = m.get(&3).map(|xs| xs.len()) {
+            scored.extend(m.get(&3).unwrap());
+            scored.extend(m.get(&3).unwrap());
+            scored.extend(m.get(&3).unwrap());
             return 2500;
         }
 
         // straight
         if let Some(6) = m.get(&1).map(|xs| xs.len()) {
+            scored.extend(m.get(&1).unwrap());
             return 2500;
         }
 
         // 5 of a kind
-        if m.get(&5).is_some() {
+        if let Some(values) = m.get(&5) {
+            scored.extend(vec![values[0]; 5]);
             m.remove(&5);
             // the last die could be a 1 or a 5
-            return 2000 + score(m);
+            return 2000 + score(m, scored);
         }
 
         // three pairs that are different
         if let Some(3) = m.get(&2).map(|xs| xs.len()) {
+            scored.extend(m.get(&2).unwrap());
+            scored.extend(m.get(&2).unwrap());
             return 1500;
         }
 
         // four of a kind and one pair = three pairs
         if m.get(&4).is_some() && m.get(&2).is_some() {
+            scored.extend(m.get(&4).unwrap());
+            scored.extend(m.get(&2).unwrap());
             return 1500;
         }
 
         // four of a kind that is not three pairs
-        if m.get(&4).is_some() {
+        if let Some(values) = m.get(&4) {
+            scored.extend(vec![values[0]; 4]);
             m.remove(&4);
-            return 2000 + score(m);
+            return 2000 + score(m, scored);
         }
 
         // 3 of a kind
-        if let Some(value) = m.get(&3) {
+        if let Some(values) = m.get(&3) {
             // more than one triple is caught earlier so this is safe
-            let triple_value = match value[0] {
+            let triple_value = match values[0] {
                 One | Three => 300,
                 Two => 200,
                 Four => 400,
                 Five => 500,
                 Six => 600,
             };
+            scored.extend(vec![values[0]; 3]);
             m.remove(&3);
             // the last die could be a 1 or a 5
-            return triple_value + score(m);
+            return triple_value + score(m, scored);
         }
 
         // TODO I can probably figure out how to get rid of this clone
@@ -189,8 +193,9 @@ pub fn score<'a>(dice: &[Value]) -> usize {
         });
 
         if let Some(ones) = ones {
+            scored.extend(vec![One; ones]);
             m.retain(|_, values| !values.contains(&One));
-            return ones * 100 + score(m);
+            return ones * 100 + score(m, scored);
         }
 
         // TODO I can probably figure out how to get rid of this clone
@@ -203,8 +208,9 @@ pub fn score<'a>(dice: &[Value]) -> usize {
         });
 
         if let Some(fives) = fives {
+            scored.extend(vec![Five; fives]);
             m.retain(|_, values| !values.contains(&Five));
-            return fives * 50 + score(m);
+            return fives * 50 + score(m, scored);
         }
 
         0
@@ -219,18 +225,24 @@ pub fn score<'a>(dice: &[Value]) -> usize {
         values.push(value);
         m.insert(count, values);
     }
-    score(&mut m)
+
+    let mut scored = vec![];
+
+    (score(&mut m, &mut scored), scored)
 }
 
 #[test]
 fn test_scores() {
-    assert_eq!(3000, score(&[One, One, One, One, One, One]));
-    assert_eq!(2500, score(&[One, Two, Three, Four, Five, Six]));
-    assert_eq!(2050, score(&[One, One, One, One, One, Five]));
-    assert_eq!(2500, score(&[One, One, One, Two, Two, Two]));
-    assert_eq!(1500, score(&[One, One, Two, Two, Two, Two]));
-    assert_eq!(200, score(&[Five, Five, One, Two, Three, Two]));
-    assert_eq!(300, score(&[One, One, One]));
-    assert_eq!(0, score(&[]));
-    assert_eq!(50, score(&[Two, Five]));
+    assert_eq!(3000, score(&[One, One, One, One, One, One]).0);
+    assert_eq!(2500, score(&[One, Two, Three, Four, Five, Six]).0);
+    assert_eq!(2050, score(&[One, One, One, One, One, Five]).0);
+    assert_eq!(2500, score(&[One, One, One, Two, Two, Two]).0);
+    assert_eq!(1500, score(&[One, One, Two, Two, Two, Two]).0);
+    assert_eq!(
+        (200, vec![One, Five, Five]),
+        score(&[Five, Five, One, Two, Three, Two])
+    );
+    assert_eq!(300, score(&[One, One, One]).0);
+    assert_eq!(0, score(&[]).0);
+    assert_eq!((50, vec![Five]), score(&[Two, Five]));
 }
