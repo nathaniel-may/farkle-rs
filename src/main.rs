@@ -15,9 +15,8 @@ fn main() {
         .flatten()
         .collect();
 
-    // println!("{turns:?}");
     for (score, liklihood) in stats(turns) {
-        println!("{score}: {liklihood}%");
+        println!("{score}: {liklihood:.6}%");
     }
 }
 
